@@ -124,9 +124,9 @@
 
         processAllBtn.addEventListener('click', async () => {
             processAllBtn.disabled = true;
-            for (const file of uploadedFiles) {
-                await processAndDisplayImage(file.card, file.dataUrl, file.fileName);
-            }
+            const processPromises = uploadedFiles.map(file => processAndDisplayImage(file.card, file.dataUrl, file.fileName));
+            await Promise.all(processPromises);
+            updateButtonsVisibility();
         });
 
         function createCard(dataUrl, fileName) {
