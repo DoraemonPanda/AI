@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Overprint Removal</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a202c;
+            color: #e2e8f0;
+        }
+        .container {
+            max-width: 1200px;
+            margin: auto;
+            padding: 2rem;
+        }
+        .file-input-label {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            border-radius: 0.75rem;
+            border: 2px dashed #4a5568;
+            padding: 2rem;
+            transition: background-color 0.2s;
+        }
+        .file-input-label:hover {
+            background-color: #2d3748;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+
+    <div class="container">
+        <div class="text-center mb-10">
+            <h1 class="text-4xl font-bold mb-2">Image Overprint Remover</h1>
+            <p class="text-gray-400 text-lg">
+                Upload images to remove overprinted transparent text.
+                <br class="hidden sm:block">
+                (Powered by `gemini-2.5-flash-image-preview` or "nano banana").
+            </p>
+        </div>
+
+        <div class="bg-gray-800 rounded-2xl shadow-lg p-6 mb-8">
+            <label for="image-upload" class="file-input-label">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-gray-500 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                <span class="text-lg font-medium">Click or drag images to upload</span>
+                <span class="text-sm text-gray-500 mt-1">PNG, JPG, GIF (max 10MB per file)</span>
+            </label>
+            <input type="file" id="image-upload" multiple accept="image/*" class="hidden">
+        </div>
+
+        <div id="action-buttons-container" class="text-center mb-8 hidden flex justify-center gap-4">
+            <button id="process-all-btn" class="bg-blue-600 hover:bg-blue-700 text-white py-3 px-6 rounded-lg font-bold transition-colors shadow-lg">Process Images</button>
+            <button id="download-all-btn" class="bg-blue-600 hover:bg-blue-700 text-white py-3 px-6 rounded-lg font-bold transition-colors shadow-lg" disabled>Download All Images</button>
+        </div>
+
+        <div id="image-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+            <!-- Uploaded images and their processing status will appear here -->
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <script>
+        const imageUploadInput = document.getElementById('image-upload');
+        const imageContainer = document.getElementById('image-container');
+        const actionButtonsContainer = document.getElementById('action-buttons-container');
+        const processAllBtn = document.getElementById('process-all-btn');
+        const downloadAllBtn = document.getElementById('download-all-btn');
+
+        const API_KEY = "";
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent?key=${API_KEY}`;
+        
+        const processedImages = new Map();
+        const uploadedFiles = [];
+
+        // Handles file selection
+        imageUploadInput.addEventListener('change', async (e) => {
+            const files = e.target.files;
+            if (files.length === 0) return;
+
+            imageContainer.innerHTML = '';
+            uploadedFiles.length = 0;
+            processedImages.clear();
+            
+            actionButtonsContainer.classList.remove('hidden');
+            processAllBtn.disabled = false;
+            downloadAllBtn.disabled = true;
+
+            Array.from(files).forEach(file => {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const originalDataUrl = event.target.result;
+                    const imageCard = createCard(originalDataUrl, file.name);
+                    imageContainer.appendChild(imageCard);
+                    uploadedFiles.push({ card: imageCard, dataUrl: originalDataUrl, fileName: file.name });
+                };
+                reader.readAsDataURL(file);
+            });
+        });
+
+        // Drag and drop functionality
+        document.body.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+
+        document.body.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                imageUploadInput.files = files;
+                imageUploadInput.dispatchEvent(new Event('change'));
+            }
+        });
+
+        processAllBtn.addEventListener('click', async () => {
+            processAllBtn.disabled = true;
+            for (const file of uploadedFiles) {
+                await processAndDisplayImage(file.card, file.dataUrl, file.fileName);
+            }
+        });
+
+        function createCard(dataUrl, fileName) {
+            const imageCard = document.createElement('div');
+            imageCard.className = 'relative bg-gray-800 p-4 rounded-xl shadow-lg flex flex-col items-center justify-center space-y-4';
+            imageCard.innerHTML = `
+                <div class="relative w-full h-48 bg-gray-700 rounded-lg flex items-center justify-center">
+                    <img src="${dataUrl}" alt="${fileName}" class="max-w-full max-h-full rounded-lg object-contain">
+                </div>
+                <div class="text-center">
+                    <p class="font-medium text-gray-300 truncate w-48">${fileName}</p>
+                    <p class="text-sm text-gray-500">Status: Ready to Process</p>
+                </div>
+                <div class="flex gap-2 w-full">
+                    <button class="w-1/2 bg-green-600 hover:bg-green-700 text-white py-2 rounded-lg font-semibold transition-colors download-btn hidden" disabled>Download</button>
+                    <button class="w-1/2 bg-yellow-600 hover:bg-yellow-700 text-white py-2 rounded-lg font-semibold transition-colors reprocess-btn hidden">Re-Process</button>
+                </div>
+            `;
+
+            // Add the remove button
+            const removeButton = document.createElement('button');
+            removeButton.innerHTML = '&times;';
+            removeButton.className = 'absolute top-2 right-2 p-1 bg-red-600 hover:bg-red-700 text-white rounded-full h-6 w-6 flex items-center justify-center shadow-lg transition-colors';
+            removeButton.onclick = () => { 
+                imageCard.remove(); 
+                const index = uploadedFiles.findIndex(f => f.fileName === fileName);
+                if (index > -1) uploadedFiles.splice(index, 1);
+                processedImages.delete(fileName);
+                updateButtonsVisibility();
+            };
+            imageCard.appendChild(removeButton);
+
+            return imageCard;
+        }
+
+        async function processAndDisplayImage(imageCard, dataUrl, fileName) {
+            const statusText = imageCard.querySelector('p:last-child');
+            const downloadBtn = imageCard.querySelector('.download-btn');
+            const reprocessBtn = imageCard.querySelector('.reprocess-btn');
+            const imageWrapper = imageCard.querySelector('div:first-child');
+            
+            statusText.textContent = 'Status: Processing...';
+            if (reprocessBtn) reprocessBtn.classList.add('hidden');
+            if (downloadBtn) downloadBtn.classList.add('hidden');
+
+            try {
+                const base64Data = dataUrl.split(',')[1];
+                const processedImageData = await processImageWithAPI(base64Data);
+                const processedDataUrl = `data:image/png;base64,${processedImageData}`;
+                
+                imageWrapper.innerHTML = `<img src="${processedDataUrl}" alt="${fileName}" class="max-w-full max-h-full rounded-lg object-contain">`;
+                
+                statusText.textContent = 'Status: Complete';
+                if (downloadBtn) {
+                    downloadBtn.classList.remove('hidden');
+                    downloadBtn.disabled = false;
+                    downloadBtn.onclick = () => downloadImage(processedDataUrl, fileName);
+                }
+                if (reprocessBtn) {
+                    reprocessBtn.classList.remove('hidden');
+                    reprocessBtn.onclick = () => processAndDisplayImage(imageCard, processedDataUrl, fileName);
+                }
+
+                processedImages.set(fileName, processedDataUrl);
+                updateButtonsVisibility();
+            } catch (error) {
+                imageWrapper.innerHTML = `<div class="p-4 text-center text-red-400">Error: ${error.message}</div>`;
+                statusText.textContent = 'Status: Failed';
+                console.error(error);
+                updateButtonsVisibility();
+            }
+        }
+
+        async function processImageWithAPI(base64Data) {
+            const parts = [
+                {
+                    inlineData: {
+                        mimeType: 'image/jpeg',
+                        data: base64Data
+                    }
+                },
+                {
+                    text: "Remove any and all text, logos, or transparent designs from the image. The goal is to return a clean, final image without text. Return only the modified image, without any text in your response."
+                }
+            ];
+
+            const payload = {
+                contents: [
+                    { parts: parts }
+                ],
+                generationConfig: {
+                    responseModalities: ["IMAGE"]
+                }
+            };
+
+            let response;
+            try {
+                response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+            } catch(e) {
+                 throw new Error("Network error or API is down.");
+            }
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error.message || 'API request failed');
+            }
+
+            const result = await response.json();
+            const processedImageData = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
+            if (!processedImageData) {
+                throw new Error('API response did not contain image data.');
+            }
+
+            return processedImageData;
+        }
+
+        function downloadImage(dataUrl, fileName) {
+            const link = document.createElement('a');
+            link.href = dataUrl;
+            link.download = `processed_${fileName}`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        function updateButtonsVisibility() {
+            if (uploadedFiles.length > 0) {
+                actionButtonsContainer.classList.remove('hidden');
+                if (processedImages.size === uploadedFiles.length) {
+                    downloadAllBtn.disabled = false;
+                } else {
+                    downloadAllBtn.disabled = true;
+                }
+            } else {
+                actionButtonsContainer.classList.add('hidden');
+            }
+        }
+
+        downloadAllBtn.addEventListener('click', async () => {
+            const zip = new JSZip();
+            processedImages.forEach((dataUrl, fileName) => {
+                const base64Data = dataUrl.split(',')[1];
+                zip.file(fileName, base64Data, { base64: true });
+            });
+
+            const content = await zip.generateAsync({ type: "blob" });
+            saveAs(content, "processed_images.zip");
+        });
+
+    </script>
+</body>
+</html>
