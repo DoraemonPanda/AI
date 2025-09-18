@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Image Enhancer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d0d0d;
+            color: #f0f0f0;
+        }
+        .container {
+            max-width: 1200px;
+        }
+        .shadow-custom {
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06), inset 0 2px 4px rgba(255, 255, 255, 0.1);
+        }
+        input[type="file"]::file-selector-button {
+            cursor: pointer;
+            background-color: #2a2a2a;
+            color: #ffffff;
+            font-weight: 600;
+            padding: 0.5rem 1rem;
+            border: 2px solid #4a4a4a;
+            border-radius: 0.5rem;
+            transition: all 0.3s ease;
+        }
+        input[type="file"]::file-selector-button:hover {
+            background-color: #3b3b3b;
+            border-color: #6a6a6a;
+        }
+        .download-btn {
+            background-color: #1e40af;
+            color: #ffffff;
+            transition: background-color 0.3s ease;
+        }
+        .download-btn:hover {
+            background-color: #1c3c9f;
+        }
+    </style>
+</head>
+<body class="p-6 md:p-12 min-h-screen flex items-center justify-center">
+    <div class="container mx-auto">
+        <div class="bg-[#1a1a1a] rounded-xl p-8 md:p-12 shadow-custom border border-[#2a2a2a]">
+            <!-- Header Section -->
+            <div class="text-center mb-8">
+                <h1 class="text-3xl md:text-4xl font-bold mb-2 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500">
+                    Image Quality Enhancer
+                </h1>
+                <p class="text-gray-400">Transform your photos with AI-powered quality enhancement. Upload multiple images to get started.</p>
+            </div>
+
+            <!-- File Upload Section -->
+            <div class="mb-8">
+                <label for="image-upload" class="block text-sm font-medium text-gray-300 mb-2">Upload your images</label>
+                <input type="file" id="image-upload" multiple accept="image/*" class="w-full text-sm text-gray-500
+                    file:mr-4 file:py-2 file:px-4
+                    file:rounded-full file:border-0
+                    file:text-sm file:font-semibold
+                    file:bg-violet-50 file:text-violet-700
+                    hover:file:bg-violet-100
+                " />
+                <button id="enhance-btn" class="w-full mt-4 py-3 rounded-xl bg-gradient-to-r from-blue-500 to-purple-500 text-white font-semibold transition-transform transform hover:scale-105 duration-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900" disabled>
+                    Enhance Images
+                </button>
+                <div id="loading-indicator" class="mt-4 text-center text-gray-400 hidden">
+                    <p>Processing images... please wait.</p>
+                </div>
+            </div>
+
+            <!-- Image Galleries -->
+            <div class="flex flex-col md:flex-row gap-8">
+                <!-- Uploaded Images -->
+                <div class="flex-1">
+                    <h2 class="text-xl font-semibold mb-4 text-gray-200">Uploaded Images</h2>
+                    <div id="uploaded-images-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                        <!-- Images will be injected here -->
+                    </div>
+                </div>
+
+                <!-- Enhanced Images -->
+                <div class="flex-1">
+                    <h2 class="text-xl font-semibold mb-4 text-gray-200">Enhanced Images</h2>
+                    <div id="enhanced-images-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                        <!-- Enhanced images will be injected here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const uploadedImagesContainer = document.getElementById('uploaded-images-container');
+            const enhancedImagesContainer = document.getElementById('enhanced-images-container');
+            const imageUploadInput = document.getElementById('image-upload');
+            const enhanceButton = document.getElementById('enhance-btn');
+            const loadingIndicator = document.getElementById('loading-indicator');
+
+            let imagesToEnhance = [];
+            const apiKey = "";
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent?key=${apiKey}`;
+
+            // Helper function to create a new card for an image
+            const createImageCard = (src, title, showDownloadBtn = false) => {
+                const card = document.createElement('div');
+                card.className = "relative bg-[#222] rounded-lg overflow-hidden shadow-lg border border-[#333]";
+
+                const img = new Image();
+                img.src = src;
+                img.alt = title;
+                img.className = "w-full h-auto object-cover";
+
+                const titleElement = document.createElement('p');
+                titleElement.className = "absolute top-2 left-2 px-2 py-1 bg-black bg-opacity-50 text-white text-xs rounded-md";
+                titleElement.textContent = title;
+
+                card.appendChild(img);
+                card.appendChild(titleElement);
+
+                if (showDownloadBtn) {
+                    const downloadBtn = document.createElement('a');
+                    downloadBtn.href = src;
+                    downloadBtn.download = `enhanced_${title}`;
+                    downloadBtn.textContent = 'Download';
+                    downloadBtn.className = "absolute bottom-2 right-2 px-3 py-1 text-sm rounded-md download-btn";
+                    card.appendChild(downloadBtn);
+                }
+
+                return card;
+            };
+
+            // Event listener for file selection
+            imageUploadInput.addEventListener('change', (event) => {
+                uploadedImagesContainer.innerHTML = '';
+                enhancedImagesContainer.innerHTML = '';
+                imagesToEnhance = [];
+                enhanceButton.disabled = event.target.files.length === 0;
+
+                const files = Array.from(event.target.files);
+                if (files.length === 0) return;
+
+                files.forEach(file => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const imageData = e.target.result;
+                        imagesToEnhance.push({ name: file.name, data: imageData });
+                        uploadedImagesContainer.appendChild(createImageCard(imageData, file.name));
+                    };
+                    reader.readAsDataURL(file);
+                });
+            });
+
+            // The core "enhancement" function using Google Gemini API
+            const enhanceImageWithAPI = async (imgData) => {
+                const base64Data = imgData.data.split(',')[1];
+                const mimeType = imgData.data.split(',')[0].split(':')[1].split(';')[0];
+                
+                const payload = {
+                    contents: [{
+                        parts: [
+                            { text: "Enhance this image to look like it was shot with a professional HD camera. Increase sharpness, improve color and lighting, and reduce noise." },
+                            { inlineData: { mimeType: mimeType, data: base64Data } }
+                        ]
+                    }],
+                    generationConfig: {
+                        responseModalities: ["TEXT", "IMAGE"]
+                    }
+                };
+                
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        throw new Error(`API error: ${JSON.stringify(errorData)}`);
+                    }
+                    
+                    const result = await response.json();
+                    const candidate = result.candidates?.[0];
+                    const base64EnhancedData = candidate?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
+                    
+                    if (base64EnhancedData) {
+                        return `data:image/png;base64,${base64EnhancedData}`;
+                    } else {
+                        throw new Error('API response did not contain enhanced image data.');
+                    }
+                } catch (error) {
+                    console.error('Error enhancing image with API:', error);
+                    return null;
+                }
+            };
+
+            // Event listener for enhance button
+            enhanceButton.addEventListener('click', async () => {
+                if (imagesToEnhance.length === 0) return;
+
+                enhanceButton.disabled = true;
+                loadingIndicator.classList.remove('hidden');
+                enhancedImagesContainer.innerHTML = '';
+
+                // Process images one by one
+                for (const img of imagesToEnhance) {
+                    const enhancedUrl = await enhanceImageWithAPI(img);
+                    if (enhancedUrl) {
+                        enhancedImagesContainer.appendChild(createImageCard(enhancedUrl, img.name, true));
+                    }
+                }
+
+                loadingIndicator.classList.add('hidden');
+                enhanceButton.disabled = false;
+            });
+        });
+    </script>
+</body>
+</html>
