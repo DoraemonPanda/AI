@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>T-shirt Design Remover</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+        .container {
+            max-width: 1200px;
+        }
+        .file-input-container {
+            position: relative;
+            cursor: pointer;
+        }
+        .file-input {
+            position: absolute;
+            top: 0;
+            left: 0;
+            opacity: 0;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3b82f6;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .canvas-container {
+            position: relative;
+            overflow: hidden;
+            border-radius: 12px;
+            width: 100%; /* Make container fluid */
+            max-width: 800px; /* Limit container size on large screens */
+        }
+        .image-canvas, .drawing-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+            display: block;
+            width: 100%; /* Make canvas fluid */
+            height: auto; /* Maintain aspect ratio */
+        }
+        .drawing-canvas {
+            z-index: 2;
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen p-4">
+
+    <!-- Main Application Container -->
+    <div class="container bg-white p-8 rounded-2xl shadow-xl space-y-8">
+        <header class="text-center">
+            <h1 class="text-3xl md:text-4xl font-bold text-gray-800">T-shirt Design Remover</h1>
+            <p class="mt-2 text-gray-600">Upload images of a person wearing a t-shirt, select the area to remove, and download the final image.</p>
+        </header>
+
+        <!-- Upload Section -->
+        <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
+            <div class="relative w-full sm:w-auto">
+                <label for="file-upload" class="flex items-center justify-center px-6 py-3 border-2 border-dashed border-gray-300 text-gray-600 rounded-xl transition-colors hover:border-blue-500 hover:text-blue-500 cursor-pointer">
+                    <svg class="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                    <span>Choose Image</span>
+                </label>
+                <input id="file-upload" type="file" accept="image/*" class="file-input">
+            </div>
+            <button id="process-btn" class="w-full sm:w-auto flex items-center justify-center px-6 py-3 bg-blue-500 text-white font-medium rounded-xl shadow-md hover:bg-blue-600 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed">
+                <span id="process-btn-text">Process Image</span>
+                <div id="loader" class="loader ml-2 hidden"></div>
+            </button>
+        </div>
+
+        <!-- Image & Drawing Canvas -->
+        <div id="canvas-container" class="canvas-container relative flex items-center justify-center bg-gray-200 rounded-xl">
+            <canvas id="image-canvas" class="image-canvas"></canvas>
+            <canvas id="drawing-canvas" class="drawing-canvas" style="cursor: crosshair;"></canvas>
+        </div>
+
+        <!-- Brush Controls -->
+        <div id="brush-controls" class="flex flex-col sm:flex-row items-center gap-4 mt-4 hidden">
+            <label for="brush-size" class="text-gray-700">Brush Size:</label>
+            <input type="range" id="brush-size" min="5" max="50" value="20" class="w-full sm:w-auto">
+            <button id="clear-canvas-btn" class="w-full sm:w-auto px-6 py-3 bg-gray-300 text-gray-700 font-medium rounded-xl hover:bg-gray-400 transition-colors">Clear</button>
+        </div>
+
+        <!-- Message/Status Display -->
+        <div id="message" class="text-center text-red-500 font-medium hidden"></div>
+
+        <!-- Image Display Area -->
+        <div id="image-results-container" class="flex flex-col md:flex-row items-center justify-center gap-8 mt-8">
+            <!-- Processed image will be appended here -->
+        </div>
+
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const fileInput = document.getElementById('file-upload');
+            const processBtn = document.getElementById('process-btn');
+            const processBtnText = document.getElementById('process-btn-text');
+            const loader = document.getElementById('loader');
+            const messageEl = document.getElementById('message');
+            const imageResultsContainer = document.getElementById('image-results-container');
+            const brushControls = document.getElementById('brush-controls');
+            const clearCanvasBtn = document.getElementById('clear-canvas-btn');
+            const brushSizeInput = document.getElementById('brush-size');
+
+            const canvasContainer = document.getElementById('canvas-container');
+            const imageCanvas = document.getElementById('image-canvas');
+            const drawingCanvas = document.getElementById('drawing-canvas');
+            const imageCtx = imageCanvas.getContext('2d');
+            const drawingCtx = drawingCanvas.getContext('2d');
+            
+            let uploadedFile = null;
+            let isDrawing = false;
+            let lastX = 0;
+            let lastY = 0;
+
+            // Display error messages in a visible UI element
+            function showMessage(text, isError = false) {
+                messageEl.textContent = text;
+                messageEl.className = `text-center font-medium mt-4 ${isError ? 'text-red-500' : 'text-green-500'}`;
+                messageEl.classList.remove('hidden');
+            }
+
+            // Hide the message element
+            function hideMessage() {
+                messageEl.classList.add('hidden');
+                messageEl.textContent = '';
+            }
+
+            // Handle file input change
+            fileInput.addEventListener('change', (event) => {
+                uploadedFile = event.target.files[0];
+                if (uploadedFile) {
+                    processBtn.disabled = false;
+                    hideMessage();
+                    loadImageToCanvas(uploadedFile);
+                } else {
+                    processBtn.disabled = true;
+                    imageResultsContainer.innerHTML = '';
+                    brushControls.classList.add('hidden');
+                    showMessage("Please select an image file.");
+                }
+            });
+
+            // Load selected image onto the canvas
+            function loadImageToCanvas(file) {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        // Set the canvas dimensions to match the image
+                        imageCanvas.width = img.naturalWidth;
+                        imageCanvas.height = img.naturalHeight;
+                        drawingCanvas.width = img.naturalWidth;
+                        drawingCanvas.height = img.naturalHeight;
+
+                        // Draw the image on the image canvas
+                        imageCtx.clearRect(0, 0, imageCanvas.width, imageCanvas.height);
+                        imageCtx.drawImage(img, 0, 0);
+
+                        clearDrawingCanvas();
+                        brushControls.classList.remove('hidden');
+
+                        // Set container aspect ratio based on the image to prevent distortion
+                        const aspectRatio = img.naturalWidth / img.naturalHeight;
+                        canvasContainer.style.height = `${canvasContainer.clientWidth / aspectRatio}px`;
+                    };
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+            }
+
+            // Drawing logic
+            drawingCanvas.addEventListener('mousedown', (e) => {
+                isDrawing = true;
+                [lastX, lastY] = getMousePos(e);
+            });
+
+            drawingCanvas.addEventListener('mousemove', (e) => {
+                if (!isDrawing) return;
+                const [x, y] = getMousePos(e);
+                drawStroke(lastX, lastY, x, y);
+                [lastX, lastY] = [x, y];
+            });
+
+            drawingCanvas.addEventListener('mouseup', () => {
+                isDrawing = false;
+            });
+
+            drawingCanvas.addEventListener('mouseout', () => {
+                isDrawing = false;
+            });
+            
+            // For mobile touch events
+            drawingCanvas.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                isDrawing = true;
+                [lastX, lastY] = getTouchPos(e);
+            }, { passive: false });
+
+            drawingCanvas.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+                if (!isDrawing) return;
+                const [x, y] = getTouchPos(e);
+                drawStroke(lastX, lastY, x, y);
+                [lastX, lastY] = [x, y];
+            }, { passive: false });
+
+            drawingCanvas.addEventListener('touchend', () => {
+                isDrawing = false;
+            });
+
+            // Get mouse position relative to canvas
+            function getMousePos(e) {
+                const rect = drawingCanvas.getBoundingClientRect();
+                const scaleX = drawingCanvas.width / rect.width;
+                const scaleY = drawingCanvas.height / rect.height;
+                return [
+                    (e.clientX - rect.left) * scaleX,
+                    (e.clientY - rect.top) * scaleY
+                ];
+            }
+            
+            // Get touch position relative to canvas
+            function getTouchPos(e) {
+                const rect = drawingCanvas.getBoundingClientRect();
+                const touch = e.touches[0];
+                const scaleX = drawingCanvas.width / rect.width;
+                const scaleY = drawingCanvas.height / rect.height;
+                return [
+                    (touch.clientX - rect.left) * scaleX,
+                    (touch.clientY - rect.top) * scaleY
+                ];
+            }
+            
+            // Draw on the canvas
+            function drawStroke(x1, y1, x2, y2) {
+                drawingCtx.beginPath();
+                drawingCtx.moveTo(x1, y1);
+                drawingCtx.lineTo(x2, y2);
+                drawingCtx.strokeStyle = 'white';
+                drawingCtx.lineWidth = brushSizeInput.value;
+                drawingCtx.lineCap = 'round';
+                drawingCtx.stroke();
+            }
+
+            // Clear the drawing canvas
+            function clearDrawingCanvas() {
+                drawingCtx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+            }
+
+            clearCanvasBtn.addEventListener('click', clearDrawingCanvas);
+
+            // Handle process button click
+            processBtn.addEventListener('click', async () => {
+                if (!uploadedFile) {
+                    showMessage("No image selected. Please choose an image to process.", true);
+                    return;
+                }
+
+                processBtn.disabled = true;
+                processBtnText.textContent = "Processing...";
+                loader.classList.remove('hidden');
+                hideMessage();
+                imageResultsContainer.innerHTML = '';
+
+                try {
+                    await processImage(uploadedFile);
+                    processBtn.disabled = false;
+                    processBtnText.textContent = "Process Image";
+                    loader.classList.add('hidden');
+                    showMessage("Processing complete!", false);
+                } catch (error) {
+                    console.error("Processing failed:", error);
+                    processBtn.disabled = false;
+                    processBtnText.textContent = "Process Image";
+                    loader.classList.add('hidden');
+                    showMessage(`An error occurred: ${error.message}`, true);
+                }
+            });
+
+            // Function to process a single image using the Gemini API
+            async function processImage(file) {
+                return new Promise((resolve, reject) => {
+                    const originalReader = new FileReader();
+                    originalReader.onload = async (e) => {
+                        const originalBase64 = e.target.result.split(',')[1];
+                        
+                        // Create a separate canvas for the mask
+                        const maskCanvas = document.createElement('canvas');
+                        maskCanvas.width = drawingCanvas.width;
+                        maskCanvas.height = drawingCanvas.height;
+                        const maskCtx = maskCanvas.getContext('2d');
+                        maskCtx.fillStyle = 'black';
+                        maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+                        
+                        // Draw the user's drawing onto the mask
+                        maskCtx.drawImage(drawingCanvas, 0, 0);
+                        const maskBase64 = maskCanvas.toDataURL('image/png').split(',')[1];
+
+                        const userPrompt = "Remove all text, logos, or designs from the t-shirt in the area indicated by the mask. The mask is a black image with white markings. Do not change anything else.";
+                        
+                        const payload = {
+                            contents: [
+                                {
+                                    parts: [
+                                        { text: userPrompt },
+                                        { inlineData: { mimeType: file.type, data: originalBase64 } },
+                                        { inlineData: { mimeType: 'image/png', data: maskBase64 } }
+                                    ]
+                                }
+                            ],
+                            generationConfig: {
+                                responseModalities: ['TEXT', 'IMAGE']
+                            },
+                        };
+
+                        const apiKey = ""; // Leave as-is
+                        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent?key=${apiKey}`;
+
+                        try {
+                            const response = await fetch(apiUrl, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload)
+                            });
+
+                            if (!response.ok) {
+                                const errorText = await response.text();
+                                throw new Error(`API Error: ${response.status} ${response.statusText} - ${errorText}`);
+                            }
+
+                            const result = await response.json();
+                            console.log("API Response:", JSON.stringify(result, null, 2));
+
+                            const candidate = result?.candidates?.[0];
+                            const base64Image = candidate?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
+                            const textResponse = candidate?.content?.parts?.find(p => p.text)?.text;
+
+
+                            if (base64Image) {
+                                const imageUrl = `data:image/png;base64,${base64Image}`;
+                                appendImageResult(e.target.result, imageUrl, file.name);
+                                resolve();
+                            } else if (textResponse) {
+                                // There is a text response, but no image.
+                                reject(new Error(`The API returned a text response instead of an image. Here is the message: "${textResponse}"`));
+                            } else {
+                                // No image and no text response in the expected format.
+                                throw new Error("Could not find a processed image or a text explanation in the API response.");
+                            }
+
+                        } catch (error) {
+                            console.error("API call failed:", error);
+                            reject(error);
+                        }
+                    };
+                    originalReader.readAsDataURL(file);
+                });
+            }
+
+            // Function to append processed image to the results container
+            function appendImageResult(originalUrl, processedUrl, fileName) {
+                const resultContainer = document.createElement('div');
+                resultContainer.className = 'flex flex-col items-center p-4 bg-gray-100 rounded-xl shadow-md';
+                resultContainer.innerHTML = `
+                    <p class="font-bold text-gray-700 mb-2">Processed</p>
+                    <img src="${processedUrl}" alt="Processed" class="rounded-lg max-w-full h-auto mb-4">
+                    <button class="download-btn w-full px-4 py-2 bg-green-500 text-white font-medium rounded-xl hover:bg-green-600 transition-colors" data-url="${processedUrl}" data-filename="processed_${fileName}">
+                        Download
+                    </button>
+                `;
+                imageResultsContainer.appendChild(resultContainer);
+
+                // Add original image next to it
+                const originalContainer = document.createElement('div');
+                originalContainer.className = 'flex flex-col items-center p-4 bg-gray-100 rounded-xl shadow-md';
+                originalContainer.innerHTML = `
+                    <p class="font-bold text-gray-700 mb-2">Original</p>
+                    <img src="${originalUrl}" alt="Original" class="rounded-lg max-w-full h-auto mb-4">
+                `;
+                imageResultsContainer.prepend(originalContainer);
+            }
+
+            // Handle download button click
+            imageResultsContainer.addEventListener('click', (event) => {
+                if (event.target.classList.contains('download-btn')) {
+                    const url = event.target.dataset.url;
+                    const filename = event.target.dataset.filename;
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = filename;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
