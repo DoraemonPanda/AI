@@ -1,0 +1,654 @@
+import React, { useState, useEffect, useCallback, useReducer } from 'react';
+import { Download, X, RotateCcw, Image, Loader2, Zap, SaveAll } from 'lucide-react';
+
+// --- Constants ---
+const API_URL = "https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict";
+const API_KEY = ""; // Placeholder for the API Key
+
+// Aspect Ratio mapping for Imagen 3.0 API
+const ASPECT_RATIOS = {
+    'Square (1:1)': '1:1',
+    'Landscape (4:3)': '4:3',
+    'Portrait (3:4)': '3:4',
+    'Widescreen (16:9)': '16:9',
+};
+
+// Suggested Art Styles for the prompt (Updated with user's full list)
+const ART_STYLES = [
+    'No Style', // Index 0 is used for the "no style" conditional check in generation logic
+    'Casual Photo',
+    'Painted Anime',
+    'Cinematic',
+    'Digital Painting',
+    'Concept Art',
+    '3D Disney Character',
+    '2D Disney Character',
+    'Disney Sketch',
+    'Concept Sketch',
+    'Painterly',
+    'Oil Painting',
+    'Oil Painting - Realism',
+    'Oil Painting - Old',
+    'Oil Painting - 70s Pulp',
+    'Professional Photo',
+    'Anime',
+    'Drawn Anime',
+    'Anime Screencap',
+    'Cute Anime',
+    'Soft Anime',
+    'Fantasy Painting',
+    'Fantasy Landscape',
+    'Fantasy Portrait',
+    'Studio Ghibli',
+    '50s Enamel Sign',
+    'Vintage Comic',
+    'Franco-Belgian Comic',
+    'Tintin Comic',
+    'Medieval',
+    'Pixel Art',
+    'Furry - Oil',
+    'Furry - Cinematic',
+    'Furry - Painted',
+    'Furry - Drawn',
+    'Cute Figurine',
+    '3D Emoji',
+    'Illustration',
+    'Cute Illustration',
+    'Flat Illustration',
+    'Watercolor',
+    '1990s Photo',
+    '1980s Photo',
+    '1970s Photo',
+    '1960s Photo',
+    '1950s Photo',
+    '1940s Photo',
+    '1930s Photo',
+    '1920s Photo',
+    'Vintage Pulp Art',
+    '50s Infomercial Anime',
+    '3D Pokemon',
+    'Painted Pokemon',
+    '2D Pokemon',
+    'Vintage Anime',
+    'Neon Vintage Anime',
+    'Manga',
+    'Fantasy World Map',
+    'Fantasy City Map',
+    'Old World Map',
+    '3D Isometric Icon',
+    'Flat Style Icon',
+    'Flat Style Logo',
+    'Game Art Icon',
+    'Digital Painting Icon',
+    'Concept Art Icon',
+    'Cute 3D Icon',
+    'Cute 3D Icon Set',
+    'Crayon Drawing',
+    'Pencil',
+    'Tattoo Design',
+    'Waifu',
+    'YuGiOh Art',
+    'Traditional Japanese',
+    'Nihonga Painting',
+    'Claymation',
+    'Cartoon',
+    'Cursed Photo',
+    'MTG Card',
+];
+
+// --- Utility Functions ---
+
+/**
+ * Converts aspect ratio string (e.g., '4:3') to CSS aspect class (e.g., 'aspect-[4/3]')
+ * for maintaining ratio in the UI.
+ */
+const getAspectRatioClass = (ratio) => {
+    // FIX: Corrected parenthesis placement for .split(':').map(Number)
+    const [width, height] = ratio.split(':').map(Number);
+    if (!width || !height) return 'aspect-square';
+    // Using Tailwind JIT format for dynamic aspect ratios
+    return `aspect-[${width}/${height}]`;
+};
+
+/**
+ * Downloads a base64 image data string.
+ */
+const downloadImage = (base64Data, jobId) => {
+    const link = document.createElement('a');
+    link.href = `data:image/png;base64,${base64Data}`;
+    link.download = `ai-art-${jobId}-${Date.now()}.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+};
+
+// --- ZIP Utility Functions (Self-Contained) ---
+
+/**
+ * Converts Base64 string to ArrayBuffer.
+ */
+const base64ToArrayBuffer = (base64) => {
+    const binaryString = atob(base64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+};
+
+/**
+ * Creates a ZIP file Blob from an array of file objects.
+ * NOTE: This is a minimal, self-contained implementation for demonstration purposes.
+ * A production application would typically use a dedicated library like JSZip.
+ */
+const createZipBlob = (files) => {
+    const date = new Date();
+    const dosTime = (date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() / 2);
+    const dosDate = ((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
+
+    const parts = [];
+    let offset = 0;
+    const centralDirectoryParts = [];
+
+    files.forEach((file, index) => {
+        const fileName = file.name;
+        const fileData = file.data;
+        const crc32 = 0; // Simplified: CRC32 is complex, leaving as 0
+        const uncompressedSize = fileData.byteLength;
+
+        // 1. Local File Header
+        const header = new ArrayBuffer(30 + fileName.length);
+        const view = new DataView(header);
+        
+        // Local file header signature (0x04034b50)
+        view.setUint32(0, 0x04034b50, true);
+        // Version needed to extract (20)
+        view.setUint16(4, 20, true);
+        // General purpose bit flag (0)
+        view.setUint16(6, 0, true);
+        // Compression method (0 = stored)
+        view.setUint16(8, 0, true);
+        // Last modified file time and date
+        view.setUint16(10, dosTime, true);
+        view.setUint16(12, dosDate, true);
+        // CRC-32 (0 for simplicity)
+        view.setUint32(14, crc32, true);
+        // Compressed size (same as uncompressed)
+        view.setUint32(18, uncompressedSize, true);
+        // Uncompressed size
+        view.setUint32(22, uncompressedSize, true);
+        // File name length
+        view.setUint16(26, fileName.length, true);
+        // Extra field length (0)
+        view.setUint16(28, 0, true);
+
+        // Append file name
+        const fileNameBytes = new TextEncoder().encode(fileName);
+        new Uint8Array(header, 30).set(fileNameBytes);
+
+        parts.push(header);
+        parts.push(fileData);
+
+        // 2. Central Directory File Header
+        const cdHeader = new ArrayBuffer(46 + fileName.length);
+        const cdView = new DataView(cdHeader);
+
+        // Central file header signature (0x02014b50)
+        cdView.setUint32(0, 0x02014b50, true);
+        // Version made by (20)
+        cdView.setUint16(4, 20, true);
+        // Version needed to extract (20)
+        cdView.setUint16(6, 20, true);
+        // General purpose bit flag (0)
+        cdView.setUint16(8, 0, true);
+        // Compression method (0 = stored)
+        cdView.setUint16(10, 0, true);
+        // Last modified file time and date
+        cdView.setUint16(12, dosTime, true);
+        cdView.setUint16(14, dosDate, true);
+        // CRC-32 (0 for simplicity)
+        cdView.setUint32(16, crc32, true);
+        // Compressed size
+        cdView.setUint32(20, uncompressedSize, true);
+        // Uncompressed size
+        cdView.setUint32(24, uncompressedSize, true);
+        // File name length
+        cdView.setUint16(28, fileName.length, true);
+        // Extra field length (0)
+        cdView.setUint16(30, 0, true);
+        // File comment length (0)
+        cdView.setUint16(32, 0, true);
+        // Disk number where file starts (0)
+        cdView.setUint16(34, 0, true);
+        // Internal file attributes (0)
+        cdView.setUint16(36, 0, true);
+        // External file attributes (0)
+        cdView.setUint32(38, 0, true);
+        // Relative offset of local file header
+        cdView.setUint32(42, offset, true);
+
+        // Append file name
+        new Uint8Array(cdHeader, 46).set(fileNameBytes);
+        centralDirectoryParts.push(cdHeader);
+        offset += header.byteLength + fileData.byteLength;
+    });
+
+    // 3. End of Central Directory Record
+    const centralDirectorySize = centralDirectoryParts.reduce((sum, part) => sum + part.byteLength, 0);
+    const eocdSize = 22;
+    const eocd = new ArrayBuffer(eocdSize);
+    const eocdView = new DataView(eocd);
+
+    // EOCD signature (0x06054b50)
+    eocdView.setUint32(0, 0x06054b50, true);
+    // Number of this disk (0)
+    eocdView.setUint16(4, 0, true);
+    // Disk where central directory starts (0)
+    eocdView.setUint16(6, 0, true);
+    // Number of central directory records on this disk
+    eocdView.setUint16(8, files.length, true);
+    // Total number of central directory records
+    eocdView.setUint16(10, files.length, true);
+    // Size of central directory
+    eocdView.setUint32(12, centralDirectorySize, true);
+    // Offset of start of central directory, relative to start of archive
+    eocdView.setUint32(16, offset, true);
+    // Comment length (0)
+    eocdView.setUint16(20, 0, true);
+
+    parts.push(...centralDirectoryParts, eocd);
+
+    return new Blob(parts, { type: 'application/zip' });
+};
+
+// --- State Management (Reducer) ---
+
+const jobsReducer = (state, action) => {
+    switch (action.type) {
+        case 'ADD_JOBS':
+            return [...state, ...action.payload];
+        case 'UPDATE_JOB':
+            return state.map(job =>
+                job.id === action.payload.id ? { ...job, ...action.payload } : job
+            );
+        case 'REMOVE_JOB':
+            return state.filter(job => job.id !== action.payload.id);
+        case 'RESET_JOBS':
+            return [];
+        default:
+            return state;
+    }
+};
+
+// --- Components ---
+
+/**
+ * Individual card to display image job status and controls.
+ */
+const ImageJobCard = ({ job, handleReprocess, handleRemove }) => {
+    const aspectRatioClass = getAspectRatioClass(job.aspectRatio);
+
+    const isGenerating = job.status === 'generating';
+    const isFailed = job.status === 'failed';
+    const isSuccess = job.status === 'success';
+
+    return (
+        <div className="flex flex-col rounded-xl overflow-hidden shadow-2xl bg-gray-800 border-2 border-gray-700 transition-all hover:shadow-cyan-500/50">
+            <div className={`relative bg-gray-900 flex items-center justify-center p-4 ${aspectRatioClass}`}>
+                {isSuccess && job.base64Image ? (
+                    <img
+                        src={`data:image/png;base64,${job.base64Image}`}
+                        alt={`Generated image ${job.id}`}
+                        className="w-full h-full object-cover rounded-lg"
+                        loading="lazy"
+                    />
+                ) : isGenerating ? (
+                    <div className="text-center p-8 text-cyan-400">
+                        <Loader2 className="w-8 h-8 animate-spin mx-auto mb-2" />
+                        <p className="text-sm">Generating...</p>
+                    </div>
+                ) : isFailed ? (
+                    <div className="text-center p-8 text-red-400">
+                        <Zap className="w-8 h-8 mx-auto mb-2" />
+                        <p className="text-sm font-semibold">Failed!</p>
+                        <p className="text-xs mt-1 text-gray-400 break-words max-w-full overflow-hidden">{job.errorMessage || 'Unknown error'}</p>
+                    </div>
+                ) : (
+                    <div className="text-center p-8 text-gray-400">
+                        <Image className="w-8 h-8 mx-auto mb-2" />
+                        <p className="text-sm">Pending</p>
+                    </div>
+                )}
+                {/* Reprocess/Remove Overlay */}
+                <div className={`absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity ${isGenerating ? 'opacity-100' : 'opacity-0 hover:opacity-100'}`}>
+                    {isSuccess && (
+                        <button
+                            onClick={() => downloadImage(job.base64Image, job.id)}
+                            className="p-3 m-1 bg-green-500 hover:bg-green-600 text-white rounded-full shadow-lg transition duration-150 transform hover:scale-105"
+                            title="Download Image"
+                        >
+                            <Download className="w-5 h-5" />
+                        </button>
+                    )}
+                    {(isSuccess || isFailed) && (
+                        <button
+                            onClick={() => handleReprocess(job.id, job.prompt, job.aspectRatio)}
+                            disabled={isGenerating}
+                            className={`p-3 m-1 bg-yellow-500 hover:bg-yellow-600 text-white rounded-full shadow-lg transition duration-150 transform hover:scale-105 ${isGenerating ? 'opacity-50 cursor-not-allowed' : ''}`}
+                            title="Reprocess Image"
+                        >
+                            <RotateCcw className="w-5 h-5" />
+                        </button>
+                    )}
+                    <button
+                        onClick={() => handleRemove(job.id)}
+                        className="p-3 m-1 bg-red-500 hover:bg-red-600 text-white rounded-full shadow-lg transition duration-150 transform hover:scale-105"
+                        title="Remove Job"
+                    >
+                        <X className="w-5 h-5" />
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+/**
+ * Main Application Component
+ */
+const App = () => {
+    const [prompt, setPrompt] = useState('A majestic space pirate ship sailing through a nebula, cinematic lighting, 8k');
+    const [negativePrompt, setNegativePrompt] = useState('low quality, blurry, watermark, artifacts');
+    const [imageCount, setImageCount] = useState(2);
+    const [aspectRatioKey, setAspectRatioKey] = useState(Object.keys(ASPECT_RATIOS)[1]);
+    const [style, setStyle] = useState(ART_STYLES[3]); // Defaulting to 'Cinematic'
+    const [isGeneratingAll, setIsGeneratingAll] = useState(false);
+
+    const [jobs, dispatch] = useReducer(jobsReducer, []);
+
+    const successfulJobs = jobs.filter(job => job.status === 'success');
+    const isDownloadAllEnabled = successfulJobs.length > 0;
+
+    const generateImage = useCallback(async (jobId, jobPrompt, jobRatio) => {
+        dispatch({ type: 'UPDATE_JOB', payload: { id: jobId, status: 'generating', errorMessage: null } });
+
+        // Check if the selected style is the 'No Style' option (which is always ART_STYLES[0])
+        const finalPrompt = style === ART_STYLES[0]
+            ? jobPrompt
+            : `${jobPrompt}, ${style} style`;
+
+        const aspectRatio = ASPECT_RATIOS[jobRatio];
+
+        const payload = {
+            instances: [{ prompt: finalPrompt, negative_prompt: negativePrompt }],
+            parameters: {
+                sampleCount: 1,
+                aspectRatio: aspectRatio,
+            }
+        };
+
+        const maxRetries = 3;
+        let attempt = 0;
+
+        while (attempt < maxRetries) {
+            try {
+                const response = await fetch(`${API_URL}?key=${API_KEY}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`API returned status ${response.status}`);
+                }
+
+                const result = await response.json();
+
+                if (result.predictions && result.predictions.length > 0 && result.predictions[0].bytesBase64Encoded) {
+                    const base64Data = result.predictions[0].bytesBase64Encoded;
+                    dispatch({
+                        type: 'UPDATE_JOB',
+                        payload: { id: jobId, status: 'success', base64Image: base64Data }
+                    });
+                    return; // Success, exit function
+                } else {
+                    throw new Error('No image data returned in the response.');
+                }
+            } catch (error) {
+                console.error(`Attempt ${attempt + 1} failed for job ${jobId}:`, error);
+                attempt++;
+                if (attempt < maxRetries) {
+                    const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 2s, 4s
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                } else {
+                    // Final failure
+                    dispatch({
+                        type: 'UPDATE_JOB',
+                        payload: { id: jobId, status: 'failed', errorMessage: error.message || 'API call failed.' }
+                    });
+                }
+            }
+        }
+    }, [negativePrompt, style]);
+
+    const handleGenerateAll = async () => {
+        if (!prompt.trim()) return;
+
+        setIsGeneratingAll(true);
+
+        const newJobs = Array.from({ length: imageCount }, (_, index) => ({
+            id: crypto.randomUUID(),
+            prompt: prompt,
+            aspectRatio: aspectRatioKey,
+            status: 'pending',
+            base64Image: null,
+            errorMessage: null,
+        }));
+
+        dispatch({ type: 'ADD_JOBS', payload: newJobs });
+
+        // Generate all images in parallel
+        const generationPromises = newJobs.map(job => generateImage(job.id, job.prompt, job.aspectRatio));
+
+        await Promise.allSettled(generationPromises);
+
+        setIsGeneratingAll(false);
+    };
+
+    const handleReprocessJob = (jobId, jobPrompt, jobRatio) => {
+        // Find the original job's prompt and ratio to ensure it uses the current global negative prompt and style
+        const jobToReprocess = jobs.find(j => j.id === jobId);
+        if (jobToReprocess) {
+             // Reprocess uses the original job's prompt and ratio, but the current global style and negative prompt
+            generateImage(jobId, jobToReprocess.prompt, jobToReprocess.aspectRatio);
+        }
+    };
+
+    const handleRemoveJob = (jobId) => {
+        dispatch({ type: 'REMOVE_JOB', payload: { id: jobId } });
+    };
+
+    const handleDownloadAll = () => {
+        if (!isDownloadAllEnabled) return;
+
+        const filesToZip = successfulJobs.map((job, index) => ({
+            name: `image_${index + 1}_${job.id.slice(0, 5)}.png`,
+            data: base64ToArrayBuffer(job.base64Image)
+        }));
+
+        try {
+            const zipBlob = createZipBlob(filesToZip);
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(zipBlob);
+            link.download = `ai-images-batch-${Date.now()}.zip`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(link.href);
+        } catch (error) {
+            console.error("Error creating or downloading ZIP:", error);
+            // In a real app, you'd show a user-facing error message here.
+        }
+    };
+
+
+    return (
+        <div className="min-h-screen bg-gray-900 text-white font-inter p-4 sm:p-8">
+            <header className="text-center mb-10">
+                <h1 className="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-indigo-500 tracking-tight">
+                    Parallel Image Generator
+                </h1>
+                <p className="text-gray-400 mt-2">Generate multiple AI images at once, manage them individually.</p>
+            </header>
+
+            <main className="max-w-6xl mx-auto">
+                {/* --- Input Form Section --- */}
+                <div className="bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-700 mb-8">
+                    <div className="grid md:grid-cols-2 gap-6">
+                        {/* Positive Prompt */}
+                        <div className="md:col-span-2">
+                            <label htmlFor="prompt" className="block text-sm font-medium text-gray-300 mb-1">
+                                Primary Prompt (What to generate)
+                            </label>
+                            <textarea
+                                id="prompt"
+                                value={prompt}
+                                onChange={(e) => setPrompt(e.target.value)}
+                                rows="3"
+                                className="w-full p-3 bg-gray-700 border border-gray-600 rounded-xl focus:ring-cyan-500 focus:border-cyan-500 transition duration-150 text-white resize-none"
+                                placeholder="A majestic space pirate ship sailing through a nebula, cinematic lighting, 8k"
+                            ></textarea>
+                        </div>
+
+                        {/* Negative Prompt */}
+                        <div className="md:col-span-2">
+                            <label htmlFor="negative-prompt" className="block text-sm font-medium text-gray-300 mb-1">
+                                Negative Prompt (What to exclude)
+                            </label>
+                            <input
+                                type="text"
+                                id="negative-prompt"
+                                value={negativePrompt}
+                                onChange={(e) => setNegativePrompt(e.target.value)}
+                                className="w-full p-3 bg-gray-700 border border-gray-600 rounded-xl focus:ring-red-500 focus:border-red-500 transition duration-150 text-white"
+                                placeholder="low quality, blurry, watermark, artifacts, text"
+                            />
+                        </div>
+
+                        {/* Control Grid */}
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 md:col-span-2">
+                            {/* Number of Images */}
+                            <div>
+                                <label htmlFor="count" className="block text-sm font-medium text-gray-300 mb-1">
+                                    Count (1-4)
+                                </label>
+                                <input
+                                    type="number"
+                                    id="count"
+                                    value={imageCount}
+                                    onChange={(e) => setImageCount(Math.min(4, Math.max(1, Number(e.target.value))))}
+                                    min="1"
+                                    max="4"
+                                    className="w-full p-3 bg-gray-700 border border-gray-600 rounded-xl focus:ring-cyan-500 focus:border-cyan-500 transition duration-150 text-white"
+                                />
+                            </div>
+
+                            {/* Aspect Ratio */}
+                            <div>
+                                <label htmlFor="aspect-ratio" className="block text-sm font-medium text-gray-300 mb-1">
+                                    Aspect Ratio
+                                </label>
+                                <select
+                                    id="aspect-ratio"
+                                    value={aspectRatioKey}
+                                    onChange={(e) => setAspectRatioKey(e.target.value)}
+                                    className="w-full p-3 bg-gray-700 border border-gray-600 rounded-xl focus:ring-cyan-500 focus:border-cyan-500 transition duration-150 text-white appearance-none"
+                                >
+                                    {Object.keys(ASPECT_RATIOS).map(key => (
+                                        <option key={key} value={key}>{key}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            {/* Art Style */}
+                            <div>
+                                <label htmlFor="style" className="block text-sm font-medium text-gray-300 mb-1">
+                                    Art Style
+                                </label>
+                                <select
+                                    id="style"
+                                    value={style}
+                                    onChange={(e) => setStyle(e.target.value)}
+                                    className="w-full p-3 bg-gray-700 border border-gray-600 rounded-xl focus:ring-cyan-500 focus:border-cyan-500 transition duration-150 text-white appearance-none"
+                                >
+                                    {ART_STYLES.map(s => (
+                                        <option key={s} value={s}>{s}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+
+                        {/* Generate Button */}
+                        <div className="md:col-span-2 mt-4">
+                            <button
+                                onClick={handleGenerateAll}
+                                disabled={isGeneratingAll || !prompt.trim()}
+                                className="w-full flex items-center justify-center p-4 text-lg font-semibold rounded-xl text-white bg-cyan-600 hover:bg-cyan-700 shadow-lg shadow-cyan-500/50 transition duration-300 transform hover:scale-[1.01] disabled:bg-gray-600 disabled:shadow-none disabled:cursor-not-allowed"
+                            >
+                                {isGeneratingAll ? (
+                                    <>
+                                        <Loader2 className="w-6 h-6 mr-2 animate-spin" />
+                                        Processing All Images...
+                                    </>
+                                ) : (
+                                    `Generate ${imageCount} Images`
+                                )}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                {/* --- Results Section --- */}
+                {jobs.length > 0 && (
+                    <div className="mt-10">
+                        <div className="flex justify-between items-center mb-6 border-b border-gray-700 pb-2">
+                            <h2 className="text-2xl font-bold text-gray-200">
+                                Generation Results ({jobs.length} Jobs)
+                            </h2>
+                            <button
+                                onClick={handleDownloadAll}
+                                disabled={!isDownloadAllEnabled}
+                                className={`flex items-center px-4 py-2 text-sm font-semibold rounded-xl transition duration-200 ${
+                                    isDownloadAllEnabled
+                                        ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg shadow-indigo-500/50'
+                                        : 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                                }`}
+                                title="Download all successful images as a ZIP file"
+                            >
+                                <SaveAll className="w-5 h-5 mr-2" />
+                                Download All as ZIP ({successfulJobs.length})
+                            </button>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                            {jobs.map(job => (
+                                <ImageJobCard
+                                    key={job.id}
+                                    job={job}
+                                    handleReprocess={handleReprocessJob}
+                                    handleRemove={handleRemoveJob}
+                                />
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </main>
+            <footer className="text-center mt-10 text-gray-500 text-sm">
+                <p>Powered by Gemini and Imagen APIs. Parallel processing ensures quick results!</p>
+            </footer>
+        </div>
+    );
+};
+
+export default App;
