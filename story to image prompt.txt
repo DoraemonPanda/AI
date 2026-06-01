@@ -1,0 +1,434 @@
+import { useState, useRef } from "react";
+
+const FACE_RULES = `CRITICAL COMPOSITION RULES: Never show faces directly. Use these techniques instead: back shots showing characters from behind, silhouettes against light sources, framing that shows only up to shoulders from ground level, distant figures where facial features aren't distinguishable, over-the-shoulder perspectives, characters obscured by environment elements like fog, shadow, or objects.`;
+
+async function callAPI(messages, system, retries = 3) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const body = { model: "claude-sonnet-4-20250514", max_tokens: 1000, messages };
+      if (system) body.system = system;
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.status === 429 || res.status === 529) {
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, (attempt + 1) * 2500 + Math.random() * 1000));
+          continue;
+        }
+      }
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        if (attempt < retries && res.status >= 500) {
+          await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
+          continue;
+        }
+        throw new Error(e?.error?.message || `API error ${res.status}`);
+      }
+      const data = await res.json();
+      return data.content.map(b => b.text || "").join("");
+    } catch (err) {
+      if (attempt < retries && (err.message?.includes("fetch") || err.message?.includes("network"))) {
+        await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
+        continue;
+      }
+      if (attempt >= retries) throw err;
+    }
+  }
+  throw new Error("Max retries exceeded — please try again");
+}
+
+const Spinner = () => (
+  <svg className="animate-spin" width="20" height="20" viewBox="0 0 24 24" fill="none">
+    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity="0.2"/>
+    <path d="M12 2a10 10 0 019.75 7.75" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/>
+  </svg>
+);
+
+export default function App() {
+  const [file, setFile] = useState(null);
+  const [txt, setTxt] = useState("");
+  const [scenes, setScenes] = useState([]);
+  const [phase, setPhase] = useState("upload");
+  const [err, setErr] = useState(null);
+  const [done, setDone] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [drag, setDrag] = useState(false);
+  const [copied, setCopied] = useState(null);
+  const [guide, setGuide] = useState("");
+  const [showGuide, setShowGuide] = useState(false);
+  const inp = useRef(null);
+
+  const readF = f => new Promise((ok, fail) => {
+    const r = new FileReader();
+    r.onload = e => ok(e.target.result);
+    r.onerror = () => fail(new Error("Read failed"));
+    r.readAsText(f);
+  });
+
+  const handleFile = async f => {
+    if (!f) return;
+    if (!f.name.endsWith(".txt")) { setErr("Please upload a .txt file"); return; }
+    setErr(null); setFile(f);
+    setTxt(await readF(f));
+  };
+
+  const buildPromptMsg = (scene, consistencyGuide) => [{
+    role: "user",
+    content: `Create a detailed AI image generation prompt for this scene. It will be used in Midjourney / DALL-E / Stable Diffusion.
+
+=== VISUAL CONSISTENCY GUIDE (follow strictly) ===
+${consistencyGuide}
+
+=== SCENE ===
+Scene ${scene.id}: "${scene.title}"
+${scene.text}
+
+${FACE_RULES}
+
+Requirements:
+- Vivid, specific, production-ready prompt
+- Include composition, camera angle, lighting, mood, color palette, art style
+- Naturally integrate face-avoidance rules into the framing directions
+- STRICTLY follow the Visual Consistency Guide for clothing, character descriptions, atmosphere, and setting — only deviate if THIS scene's text explicitly describes a change
+- Return ONLY the prompt text, nothing else`
+  }];
+
+  const PROMPT_SYS = "Expert image prompt engineer. Return ONLY the raw prompt text. No labels, no quotes, no markdown. Strictly maintain visual consistency as described in the guide.";
+
+  const process = async () => {
+    if (!txt.trim()) return;
+    setPhase("splitting"); setScenes([]); setDone(0); setErr(null); setGuide(""); setShowGuide(false);
+    try {
+      // Step 1: Split into scenes (preserve original text)
+      const raw = await callAPI([{
+        role: "user",
+        content: `Segment the following text into small numbered scene sections. Each scene should portray ONE specific visual moment — a particular setting, action, or mood.
+
+CRITICAL RULES:
+- DO NOT modify, rewrite, summarize, or paraphrase the text in any way
+- Keep the EXACT original wording from the text — copy it verbatim into the "text" field
+- Simply decide where to split the text into scenes, preserving every word as-is
+- Each scene = one clear visual moment
+- Maximum 20 scenes
+- Return ONLY a JSON array: [{"id":1,"title":"short title","text":"exact original text segment"}, ...]
+
+Text:
+${txt.substring(0, 12000)}`
+      }], "Return ONLY valid JSON array. No markdown, no backticks, no explanation. Just the raw JSON array. NEVER modify the original text — copy it exactly as-is into each scene's text field.");
+
+      let parsed;
+      try { parsed = JSON.parse(raw.replace(/```json|```/g, "").trim()); }
+      catch { throw new Error("Failed to parse scenes — please try again."); }
+      if (!Array.isArray(parsed) || !parsed.length) throw new Error("No scenes detected in the text.");
+
+      setTotal(parsed.length);
+      setScenes(parsed.map(s => ({ ...s, prompt: null, status: "pending" })));
+
+      // Step 2: Build visual consistency guide from ALL scenes
+      setPhase("analyzing");
+      const allText = parsed.map(s => `Scene ${s.id}: ${s.text}`).join("\n\n");
+      const consistencyGuide = await callAPI([{
+        role: "user",
+        content: `Analyze ALL of the following scenes from a story and create a VISUAL CONSISTENCY GUIDE that will be shared across all image prompts to ensure visual coherence.
+
+Extract and describe:
+1. CHARACTERS: Physical build, hair (color, length, style), clothing/outfit for each character — describe in a way suitable for faceless rendering (no facial features)
+2. SETTING: Location details, architecture, environment, recurring visual elements
+3. ATMOSPHERE: Overall mood, color palette, lighting style, time of day, weather
+4. STYLE NOTES: Any recurring props, symbols, textures, or visual motifs
+
+Rules:
+- Only note a CHANGE in clothing/setting/atmosphere if the story text explicitly describes one
+- Default: keep everything consistent from scene to scene
+- Be concise but specific enough for an image generator to follow
+- Return ONLY the guide text
+
+Scenes:
+${allText}`
+      }], "You are a visual director. Return ONLY the consistency guide text. No markdown headings, no backticks. Concise, specific, ready to paste into image prompts.");
+
+      setGuide(consistencyGuide);
+
+      // Step 3: Generate prompts with controlled concurrency (2 at a time) + shared guide
+      setPhase("generating");
+      const tasks = parsed.map((scene, i) => async () => {
+        try {
+          const p = await callAPI(buildPromptMsg(scene, consistencyGuide), PROMPT_SYS);
+          setScenes(prev => prev.map((s, j) => j === i ? { ...s, prompt: p, status: "done" } : s));
+        } catch {
+          setScenes(prev => prev.map((s, j) => j === i ? { ...s, prompt: "⚠️ Failed — click retry to try again", status: "error" } : s));
+        }
+        setDone(prev => prev + 1);
+        await new Promise(r => setTimeout(r, 400));
+      });
+      let idx = 0;
+      const worker = async () => {
+        while (idx < tasks.length) {
+          const t = idx++;
+          if (t < tasks.length) await tasks[t]();
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(2, tasks.length) }, () => worker()));
+      setPhase("done");
+    } catch (e) { setErr(e.message); setPhase("upload"); }
+  };
+
+  const retryPrompt = async (i) => {
+    if (!guide) return;
+    const scene = scenes[i];
+    setScenes(prev => prev.map((s, j) => j === i ? { ...s, status: "pending", prompt: null } : s));
+    try {
+      const p = await callAPI(buildPromptMsg(scene, guide), PROMPT_SYS);
+      setScenes(prev => prev.map((s, j) => j === i ? { ...s, prompt: p, status: "done" } : s));
+    } catch {
+      setScenes(prev => prev.map((s, j) => j === i ? { ...s, prompt: "⚠️ Failed — click retry to try again", status: "error" } : s));
+    }
+  };
+
+  const copy = async (t, id) => {
+    try {
+      await navigator.clipboard.writeText(t);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = t;
+      ta.style.cssText = "position:fixed;left:-9999px;top:-9999px;opacity:0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try { document.execCommand("copy"); } catch {}
+      document.body.removeChild(ta);
+    }
+    setCopied(id);
+    setTimeout(() => setCopied(null), 1500);
+  };
+
+  const buildExport = () => {
+    const header = `═══ VISUAL CONSISTENCY GUIDE ═══\n\n${guide}\n\n${"═".repeat(50)}\n\n`;
+    const body = scenes.map(s =>
+      `══ Scene ${s.id}: ${s.title} ══\n\n📖 ${s.text}\n\n🎨 Prompt:\n${s.prompt || "Not generated"}\n`
+    ).join("\n" + "─".repeat(50) + "\n\n");
+    return header + body;
+  };
+
+  const exportAll = () => copy(buildExport(), "all");
+
+  const downloadAll = () => {
+    const content = buildExport();
+    const blob = new Blob([content], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = (file?.name?.replace(".txt", "") || "scenes") + "_prompts.txt";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const reset = () => { setFile(null); setTxt(""); setScenes([]); setPhase("upload"); setErr(null); setDone(0); setTotal(0); setGuide(""); setShowGuide(false); };
+
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  const phaseLabels = {
+    splitting: "Analyzing text & identifying scenes...",
+    analyzing: "Building visual consistency guide...",
+    generating: "Generating all prompts in parallel...",
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "linear-gradient(135deg, #0a0a1a 0%, #0f0f2e 50%, #0a0a1a 100%)" }} className="text-gray-100 p-4">
+      <div className="max-w-3xl mx-auto">
+        {/* Header */}
+        <div className="text-center mb-8 pt-4">
+          <h1 className="text-3xl font-bold" style={{ background: "linear-gradient(90deg, #a78bfa, #60a5fa)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+            Text → Scene Splitter
+          </h1>
+          <p className="text-gray-400 mt-2 text-sm">Upload a story. Get consistent, numbered scenes & image prompts.</p>
+        </div>
+
+        {/* Upload */}
+        {phase === "upload" && (
+          <div>
+            <div
+              onClick={() => inp.current?.click()}
+              onDragOver={e => { e.preventDefault(); setDrag(true); }}
+              onDragLeave={() => setDrag(false)}
+              onDrop={e => { e.preventDefault(); setDrag(false); handleFile(e.dataTransfer.files[0]); }}
+              style={{
+                border: `2px dashed ${drag ? "#a78bfa" : file ? "#34d399" : "#374151"}`,
+                background: drag ? "rgba(139,92,246,0.08)" : file ? "rgba(52,211,153,0.05)" : "rgba(255,255,255,0.02)",
+                borderRadius: 16, padding: "3rem", textAlign: "center", cursor: "pointer", transition: "all 0.2s"
+              }}
+            >
+              <input ref={inp} type="file" accept=".txt" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
+              {file ? (
+                <>
+                  <div style={{ fontSize: 40, marginBottom: 8 }}>📄</div>
+                  <p className="text-green-400 font-semibold">{file.name}</p>
+                  <p className="text-gray-500 text-xs mt-1">{txt.length.toLocaleString()} characters loaded</p>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontSize: 40, marginBottom: 8 }}>📁</div>
+                  <p className="text-gray-300">Drop your <span className="text-violet-400 font-semibold">.txt</span> file here</p>
+                  <p className="text-gray-500 text-xs mt-1">or click to browse</p>
+                </>
+              )}
+            </div>
+            {err && <p className="text-red-400 text-center text-sm mt-4">{err}</p>}
+            {file && (
+              <button onClick={process} style={{
+                marginTop: 20, width: "100%", padding: "14px 0", borderRadius: 12, border: "none", cursor: "pointer",
+                background: "linear-gradient(90deg, #7c3aed, #3b82f6)", color: "#fff", fontWeight: 700, fontSize: 15
+              }}>
+                ✨ Split into Scenes & Generate Prompts
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Progress */}
+        {(phase === "splitting" || phase === "analyzing" || phase === "generating") && (
+          <div className="text-center" style={{ padding: "3rem 0" }}>
+            <div className="flex justify-center mb-4 text-violet-400"><Spinner /></div>
+            <p className="text-lg font-semibold text-gray-200">{phaseLabels[phase]}</p>
+            {phase === "analyzing" && (
+              <p className="text-gray-500 text-xs mt-2">Extracting characters, clothing, atmosphere & setting for consistency...</p>
+            )}
+            {phase === "generating" && (
+              <div style={{ maxWidth: 360, margin: "1.5rem auto 0" }}>
+                <div className="flex justify-between text-xs text-gray-400 mb-2">
+                  <span>{done} / {total} prompts</span><span>{pct}%</span>
+                </div>
+                <div style={{ height: 6, background: "#1e1e3a", borderRadius: 99, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${pct}%`, background: "linear-gradient(90deg, #7c3aed, #3b82f6)", borderRadius: 99, transition: "width 0.4s ease" }} />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Results */}
+        {scenes.length > 0 && phase !== "splitting" && phase !== "analyzing" && (
+          <div>
+            {phase === "done" && (
+              <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
+                <p className="text-gray-400 text-sm">{scenes.length} scenes • {scenes.filter(s => s.status === "done").length} prompts ready</p>
+                <div className="flex gap-2 flex-wrap">
+                  <button onClick={exportAll} style={{
+                    padding: "8px 14px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 13,
+                    background: "linear-gradient(90deg, #7c3aed, #3b82f6)", color: "#fff", fontWeight: 600
+                  }}>
+                    {copied === "all" ? "✓ Copied All!" : "📋 Copy All"}
+                  </button>
+                  <button onClick={downloadAll} style={{
+                    padding: "8px 14px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 13,
+                    background: "linear-gradient(90deg, #059669, #0d9488)", color: "#fff", fontWeight: 600
+                  }}>
+                    ⬇ Download .txt
+                  </button>
+                  <button onClick={reset} style={{
+                    padding: "8px 14px", borderRadius: 8, border: "1px solid #374151", cursor: "pointer", fontSize: 13,
+                    background: "rgba(255,255,255,0.04)", color: "#9ca3af", fontWeight: 500
+                  }}>
+                    ↻ New File
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Consistency Guide Card */}
+            {guide && (
+              <div style={{ borderRadius: 14, background: "rgba(139,92,246,0.06)", border: "1px solid rgba(139,92,246,0.2)", marginBottom: 16, overflow: "hidden" }}>
+                <div
+                  className="flex items-center gap-2"
+                  onClick={() => setShowGuide(!showGuide)}
+                  style={{ padding: "12px 16px", cursor: "pointer", background: "rgba(139,92,246,0.08)", borderBottom: showGuide ? "1px solid rgba(139,92,246,0.15)" : "none" }}
+                >
+                  <span style={{ fontSize: 16 }}>🎨</span>
+                  <span className="font-semibold text-violet-300 text-sm" style={{ flex: 1 }}>Visual Consistency Guide</span>
+                  <span className="text-gray-500 text-xs">{showGuide ? "▲ collapse" : "▼ expand"}</span>
+                  <button onClick={e => { e.stopPropagation(); copy(guide, "guide"); }} style={{
+                    padding: "3px 10px", borderRadius: 6, border: "1px solid rgba(139,92,246,0.3)", background: "rgba(139,92,246,0.1)",
+                    color: copied === "guide" ? "#34d399" : "#c4b5fd", fontSize: 11, cursor: "pointer", fontWeight: 500
+                  }}>
+                    {copied === "guide" ? "✓ Copied" : "Copy"}
+                  </button>
+                </div>
+                {showGuide && (
+                  <div style={{ padding: 16 }}>
+                    <p className="text-gray-300 text-sm" style={{ lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{guide}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Scene Cards */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {scenes.map((s, i) => (
+                <div key={i} style={{ borderRadius: 14, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", overflow: "hidden" }}>
+                  <div className="flex items-center gap-3" style={{ padding: "10px 16px", background: "rgba(255,255,255,0.03)", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", justifyContent: "center", width: 28, height: 28,
+                      borderRadius: 99, background: "rgba(139,92,246,0.2)", color: "#c4b5fd", fontSize: 12, fontWeight: 700
+                    }}>{s.id}</span>
+                    <span className="font-semibold text-gray-200 text-sm" style={{ flex: 1 }}>{s.title}</span>
+                    {s.status === "done" && (
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => retryPrompt(i)} style={{
+                          padding: "4px 10px", borderRadius: 6, border: "1px solid #374151", background: "rgba(255,255,255,0.04)",
+                          color: "#f59e0b", fontSize: 12, cursor: "pointer", fontWeight: 500
+                        }}>
+                          ↻ Regenerate
+                        </button>
+                        <button onClick={() => copy(s.prompt, i)} style={{
+                          padding: "4px 10px", borderRadius: 6, border: "1px solid #374151", background: "rgba(255,255,255,0.04)",
+                          color: copied === i ? "#34d399" : "#9ca3af", fontSize: 12, cursor: "pointer", fontWeight: 500, transition: "color 0.2s"
+                        }}>
+                          {copied === i ? "✓ Copied" : "Copy"}
+                        </button>
+                      </div>
+                    )}
+                    {s.status === "pending" && (
+                      <span className="text-xs text-yellow-400 flex items-center gap-1" style={{ opacity: 0.8 }}>
+                        <Spinner /> Generating...
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+                    <div>
+                      <p style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 1, color: "#6b7280", marginBottom: 4 }}>Scene</p>
+                      <p className="text-gray-300 text-sm" style={{ lineHeight: 1.6 }}>{s.text}</p>
+                    </div>
+                    {s.prompt && s.status === "done" && (
+                      <div>
+                        <p style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 1, color: "#6b7280", marginBottom: 4 }}>Image Prompt</p>
+                        <p className="text-sm" style={{
+                          lineHeight: 1.6, color: "#93c5fd", background: "rgba(59,130,246,0.06)", borderRadius: 10,
+                          padding: 12, border: "1px solid rgba(59,130,246,0.12)"
+                        }}>{s.prompt}</p>
+                      </div>
+                    )}
+                    {s.status === "error" && (
+                      <div className="flex items-center gap-3">
+                        <p className="text-red-400 text-sm" style={{ flex: 1 }}>{s.prompt}</p>
+                        <button onClick={() => retryPrompt(i)} style={{
+                          padding: "6px 14px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12,
+                          background: "rgba(239,68,68,0.15)", color: "#f87171", fontWeight: 600, whiteSpace: "nowrap"
+                        }}>
+                          ↻ Retry
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
